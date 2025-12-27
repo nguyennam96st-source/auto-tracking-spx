@@ -6,7 +6,6 @@ import smtplib
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
-from webdriver_manager.chrome import ChromeDriverManager
 from selenium.webdriver.common.by import By
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -140,14 +139,21 @@ def main():
     print("🚀 SPX Tracker started on Koyeb")
 
     chrome_options = Options()
-    chrome_options.add_argument("--headless")
+    chrome_options.add_argument("--headless=new")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
-
+    chrome_options.add_argument("--disable-gpu")
+    chrome_options.add_argument("--single-process")
+    chrome_options.add_argument("--window-size=1920,1080")
+    
+    # 🚨 QUAN TRỌNG: chỉ rõ đường dẫn Chrome trên Koyeb
+    chrome_options.binary_location = "/usr/bin/chromium"
+    
     driver = webdriver.Chrome(
-        service=Service(ChromeDriverManager().install()),
+        service=Service("/usr/bin/chromedriver"),
         options=chrome_options
     )
+
 
     while True:
         data = fetch_list()
@@ -179,3 +185,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
