@@ -1,27 +1,18 @@
 import time
 import requests
-import os
 import re
+import os
+import smtplib
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from webdriver_manager.chrome import ChromeDriverManager
 from selenium.webdriver.common.by import By
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
-# ================== CONFIG (ENV VAR) ==================
-WEBAPP_BASE = os.getenv("WEBAPP_BASE")
-SECRET = os.getenv("SECRET")
-
-if not WEBAPP_BASE or not SECRET:
-    raise RuntimeError("❌ Thiếu ENV VAR: WEBAPP_BASE hoặc SECRET")
-
-# ================== CONSTANT ==================
-LOOP_MINUTES = 15
-REQUEST_DELAY = 1.5
-BATCH_LIMIT = 200
-
-# ================== REGEX ==================
-ONLY_SPX_RE = re.compile(r"^SPX", re.IGNORECASE)
+# ================== REGEX RULE ==================
+SPX_ONLY_RE = re.compile(r"^SPX", re.IGNORECASE)
 
 DELIVERED_RE = re.compile(
     r"Đã giao hàng|Delivered|Giao hàng thành công",
@@ -33,21 +24,70 @@ RETURN_DONE_RE = re.compile(
     re.IGNORECASE
 )
 
-# ================== LOG ==================
-def log(msg):
-    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}", flush=True)
+REFUSED_RE = re.compile(
+    r"Từ chối nhận hàng|Khách hàng không nhận|Refused|Cancelled by buyer",
+    re.IGNORECASE
+)
 
-# ================== GOOGLE SHEET ==================
+# ================== ENV CONFIG ==================
+WEBAPP_BASE = os.getenv("WEBAPP_BASE")
+SECRET = os.getenv("SECRET")
+
+SENDER_EMAIL = os.getenv("SENDER_EMAIL")
+APP_PASSWORD = os.getenv("APP_PASSWORD")
+RECEIVER_EMAIL = os.getenv("RECEIVER_EMAIL")
+
+LOOP_MINUTES = int(os.getenv("LOOP_MINUTES", "15"))
+REQUEST_DELAY = float(os.getenv("REQUEST_DELAY", "1.5"))
+BATCH_LIMIT = int(os.getenv("BATCH_LIMIT", "200"))
+
+# ================== EMAIL ==================
+def send_email(tracking, status, detail):
+    if not all([SENDER_EMAIL, APP_PASSWORD, RECEIVER_EMAIL]):
+        print("⚠️ Email config missing – skip sending mail")
+        return
+
+    try:
+        subject = f"[SPX ALERT] Đơn {tracking} bị TỪ CHỐI / TRẢ HÀNG"
+        body = f"""
+Mã vận đơn: {tracking}
+
+Trạng thái: {status}
+
+Lịch sử:
+{detail}
+
+-- SPX Tracker (Koyeb)
+"""
+
+        msg = MIMEMultipart()
+        msg["From"] = SENDER_EMAIL
+        msg["To"] = RECEIVER_EMAIL
+        msg["Subject"] = subject
+        msg.attach(MIMEText(body, "plain", "utf-8"))
+
+        server = smtplib.SMTP("smtp.gmail.com", 587)
+        server.starttls()
+        server.login(SENDER_EMAIL, APP_PASSWORD)
+        server.send_message(msg)
+        server.quit()
+
+        print(f"📧 Sent email for {tracking}")
+
+    except Exception as e:
+        print(f"❌ Email error: {e}")
+
+# ================== GOOGLE SCRIPT ==================
 def fetch_list():
     try:
         url = f"{WEBAPP_BASE}?secret={SECRET}"
-        r = requests.get(url, timeout=15)
+        r = requests.get(url, timeout=10)
         data = r.json()
         if not data.get("ok"):
             raise Exception(data.get("error"))
         return data.get("data", [])
     except Exception as e:
-        log(f"❌ fetch_list error: {e}")
+        print(f"❌ Fetch error: {e}")
         return []
 
 def post_result(tracking, row, status, time_str, detail):
@@ -60,49 +100,47 @@ def post_result(tracking, row, status, time_str, detail):
             "time": time_str,
             "detail": detail
         }
-        requests.post(WEBAPP_BASE, json=payload, timeout=15)
+        requests.post(WEBAPP_BASE, json=payload, timeout=10)
     except Exception as e:
-        log(f"❌ post_result error {tracking}: {e}")
+        print(f"❌ Post error: {e}")
 
 # ================== SCRAPER ==================
 def scrape_one(driver, tn):
+    driver.get("https://spx.vn/track?" + tn)
+    time.sleep(2.5)
+
+    status = "Không đọc được"
+    detail = ""
+    body = driver.find_element(By.TAG_NAME, "body").text
+
     try:
-        driver.get("https://spx.vn/track?" + tn)
-        time.sleep(2.5)
+        status_el = driver.find_element(By.CLASS_NAME, "order-status")
+        status = status_el.text.replace("\n", " ").strip()
+    except:
+        pass
 
-        status = "Không đọc được"
-        detail = ""
-        body_text = driver.find_element(By.TAG_NAME, "body").text
+    try:
+        timeline = driver.find_element(By.CLASS_NAME, "nss-comp-tracking-content")
+        items = timeline.find_elements(By.CSS_SELECTOR, ".nss-comp-tracking-item")
+        lines = []
+        for i in items:
+            raw = [x.strip() for x in i.text.split("\n") if x.strip()]
+            if len(raw) >= 3:
+                lines.append(f"{raw[0]} - {raw[1]} - {' '.join(raw[2:])}")
+            else:
+                lines.append(" - ".join(raw))
+        detail = "\n".join(lines)
+    except:
+        pass
 
-        try:
-            el = driver.find_element(By.CLASS_NAME, "order-status")
-            status = el.text.strip().replace("\n", " ")
-        except:
-            pass
-
-        try:
-            timeline = driver.find_element(By.CLASS_NAME, "nss-comp-tracking-content")
-            items = timeline.find_elements(By.CSS_SELECTOR, ".nss-comp-tracking-item")
-            lines = []
-            for i in items:
-                txt = " - ".join([x.strip() for x in i.text.split("\n") if x.strip()])
-                if txt:
-                    lines.append(txt)
-            detail = "\n".join(lines)
-        except:
-            detail = ""
-
-        return status, time.strftime("%H:%M:%S %d/%m/%Y"), detail
-
-    except Exception as e:
-        return f"ERR: {e}", time.strftime("%H:%M:%S %d/%m/%Y"), ""
+    return status, time.strftime("%H:%M:%S %d/%m/%Y"), detail
 
 # ================== MAIN LOOP ==================
 def main():
-    log("🚀 SPX BOT STARTED (KOYEB MODE)")
+    print("🚀 SPX Tracker started on Koyeb")
 
     chrome_options = Options()
-    chrome_options.add_argument("--headless=new")
+    chrome_options.add_argument("--headless")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
 
@@ -111,44 +149,33 @@ def main():
         options=chrome_options
     )
 
-    try:
-        while True:
-            log("📥 Fetch danh sách đơn...")
-            data = fetch_list()
+    while True:
+        data = fetch_list()
 
-            if not data:
-                log(f"😴 Không có đơn → ngủ {LOOP_MINUTES} phút")
-                time.sleep(LOOP_MINUTES * 60)
+        for item in data[:BATCH_LIMIT]:
+            tn = (item.get("tracking") or "").strip()
+            row = item.get("row")
+            old_status = (item.get("status") or "").strip()
+
+            if not SPX_ONLY_RE.match(tn):
                 continue
 
-            data = data[:BATCH_LIMIT]
-            log(f"🔢 Tổng đơn xử lý: {len(data)}")
+            if DELIVERED_RE.search(old_status) or RETURN_DONE_RE.search(old_status):
+                continue
 
-            for item in data:
-                tn = (item.get("tracking") or "").strip()
-                row = item.get("row")
-                old_status = (item.get("status") or "").strip()
+            print(f"🔍 Tracking {tn}")
 
-                if not tn or not ONLY_SPX_RE.match(tn):
-                    continue
+            status, time_val, detail = scrape_one(driver, tn)
+            print(f"→ {status}")
 
-                if DELIVERED_RE.search(old_status) or RETURN_DONE_RE.search(old_status):
-                    log(f"⏭️ Skip {tn} | {old_status}")
-                    continue
+            if REFUSED_RE.search(status):
+                send_email(tn, status, detail)
 
-                log(f"🔍 Tracking {tn} (Row {row})")
-                status, tstr, detail = scrape_one(driver, tn)
-                log(f"➡️ {tn} | {status}")
+            post_result(tn, row, status, time_val, detail)
+            time.sleep(REQUEST_DELAY)
 
-                post_result(tn, row, status, tstr, detail)
-                time.sleep(REQUEST_DELAY)
+        print(f"⏳ Sleep {LOOP_MINUTES} minutes")
+        time.sleep(LOOP_MINUTES * 60)
 
-            log(f"✅ Batch xong → ngủ {LOOP_MINUTES} phút")
-            time.sleep(LOOP_MINUTES * 60)
-
-    finally:
-        driver.quit()
-
-# ================== ENTRY ==================
 if __name__ == "__main__":
     main()
