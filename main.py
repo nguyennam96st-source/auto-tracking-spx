@@ -1,11 +1,16 @@
 import requests, time, re, smtplib, os
 from email.mime.text import MIMEText
 
-WEBAPP = os.getenv("WEBAPP")
-SECRET = os.getenv("SECRET")
-GMAIL_USER = os.getenv("GMAIL_USER")
-GMAIL_PASS = os.getenv("GMAIL_PASS")
-RECEIVER = os.getenv("RECEIVER")
+def get_env(key, default=""):
+    return os.getenv(key) or default
+
+self.config = {
+    "WEBAPP_BASE": get_env("WEBAPP_BASE"),
+    "SECRET": get_env("SECRET"),
+    "SENDER_EMAIL": get_env("SENDER_EMAIL"),
+    "APP_PASSWORD": get_env("APP_PASSWORD"),
+    "RECEIVER_EMAIL": get_env("RECEIVER_EMAIL"),
+}
 
 REFUSE_RE = re.compile(
     r"Từ chối nhận hàng|Không liên hệ|Giao hàng không thành công|Khách hàng không nhận",
@@ -74,3 +79,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
